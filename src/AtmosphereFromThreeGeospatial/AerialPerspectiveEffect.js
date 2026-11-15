@@ -157,7 +157,7 @@ export class AerialPerspectiveEffect {
       );
 
       // 2. 预先为 BSM blit 分配 Cesium.Texture（与 AtmospherePostProcess 一致）
-      const BSM_SIZE = 1024;
+      const BSM_SIZE = 512;
       const canHalfFloat =
         !!context.halfFloatingPointTexture && !!context.colorBufferHalfFloat;
       const bsmPixelDatatype = canHalfFloat

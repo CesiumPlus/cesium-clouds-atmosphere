@@ -151,10 +151,10 @@ float sampleShadowOpticalDepthPCF(vec3 worldPos, float distToTop, float radius, 
   if (radius < 0.1) return readShadowOpticalDepth(uv, ci, distToTop);
   float sum = 0.0;
   float phi = interleavedGradientNoise(gl_FragCoord.xy) * 6.28318530718;
-  for (int i = 0; i < 16; ++i) {
-    sum += readShadowOpticalDepth(uv + vogelDisk(i, 16, phi) * radius * texel, ci, distToTop);
+  for (int i = 0; i < 8; ++i) {
+    sum += readShadowOpticalDepth(uv + vogelDisk(i, 8, phi) * radius * texel, ci, distToTop);
   }
-  return sum / 16.0;
+  return sum / 8.0;
 }
 
 // three-geospatial correctGeometricError：远距把位置混向 bottom 球表面，减轻 tile/地形几何误差对阴影 UV 的影响

@@ -31,6 +31,8 @@ const viewer = new Cesium.Viewer("cesiumContainer", {
   selectionIndicator: false,
   skyBox: false, // 关闭自带天空盒
   skyAtmosphere: false, // 关闭自带大气
+  // 关闭 MSAA：后处理链已很重，抗锯齿交给 Cesium 默认的 FXAA，显著降低显存带宽/填充率开销
+  contextOptions: { webgl: { antialias: false } },
   requestRenderMode: false, 
 });
 

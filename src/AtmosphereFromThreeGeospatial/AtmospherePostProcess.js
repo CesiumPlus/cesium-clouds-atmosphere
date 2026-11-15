@@ -209,10 +209,10 @@ float sampleShadowOpticalDepthPCFGround(vec3 worldPos, float distToTop, float ra
   if (radius < 0.1) return readShadowOpticalDepthGround(uv, ci, distToTop);
   float sum = 0.0;
   float phi = interleavedGradientNoiseAP(gl_FragCoord.xy) * 6.28318530718;
-  for (int i = 0; i < 16; ++i) {
-    sum += readShadowOpticalDepthGround(uv + vogelDiskAP(i, 16, phi) * radius * texel, ci, distToTop);
+  for (int i = 0; i < 8; ++i) {
+    sum += readShadowOpticalDepthGround(uv + vogelDiskAP(i, 8, phi) * radius * texel, ci, distToTop);
   }
-  return sum / 16.0;
+  return sum / 8.0;
 }
 
 vec3 correctBsmPosition(vec3 posMeters, float amount) {
@@ -277,7 +277,7 @@ float marchShadowLengthAtm(vec3 cameraKm, vec3 rd, float tNear, float tFar) {
   if (u_cloudShadowEnabled == 0) return 0.0;
   float maxDist = tFar - tNear;
   if (maxDist <= 0.0) return 0.0;
-  const int STEPS = 64;
+  const int STEPS = 24;
   float stepSize = maxDist / float(STEPS);
   float shadowLen = 0.0;
   float attenuation = 1.0;
@@ -720,7 +720,7 @@ export class AtmospherePostProcess {
 
       // 供云进程 blit BSM 用的 Cesium 纹理（大气 stage 只认 Cesium.Texture）
       // 优先用 HALF_FLOAT（避免 RGBA8 量化导致 B/G 等小值变 0 → 模式4/模式1全黑）。
-      const BSM_SIZE = 1024;
+      const BSM_SIZE = 512;
       const canHalfFloat =
         !!context.halfFloatingPointTexture && !!context.colorBufferHalfFloat;
       const bsmPixelDatatype = canHalfFloat

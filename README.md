@@ -142,6 +142,7 @@ lensFlare.init();
 | `blueNoiseUrl` | `"./public/data/noisePic/noisergba256.png"` | 蓝噪声图 URL |
 | `atmosphereAssetsBase` | `"./src/AtmosphereFromThreeGeospatial/assets/"` | 大气 LUT `.bin` 目录（透传给 AtmospherePostProcess / AerialPerspectiveEffect） |
 | `atmosphereShaderBase` | `"./src/AtmosphereFromThreeGeospatial/Shaders/"` | `sky.glsl` / `aerialPerspectiveEffect.frag` 等目录（透传） |
+| `cloudRenderScale` | `0.5` | 体积云 pass 的渲染分辨率倍率（0.25–1.0）。默认半分辨率，云采样量降到 1/4，是主要的性能开关；追求画质可设为 `0.75` 或 `1.0` |
 
 若你的资源部署在与默认值不同的位置（例如打包后资源在 `/assets/clouds/` 下），
 只需在构造时覆盖对应选项即可：

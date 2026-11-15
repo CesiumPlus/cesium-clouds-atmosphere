@@ -24,10 +24,11 @@ import {
   DEFAULT_ATMOSPHERE_SHADER_BASE,
 } from "./assetPaths.js";
 
-const SHADOW_MAP_SIZE = 1024;
+// 性能优先：BSM 阴影图从 1024 降到 512（每级联 256²），阴影更软但开销降至 1/4
+const SHADOW_MAP_SIZE = 512;
 const SHADOW_CASCADE_COUNT = 4;
 const SHADOW_RAY_FAR = 500000.0;
-const BSM_BLIT_SIZE = 1024;
+const BSM_BLIT_SIZE = 512;
 
 // ─── Cloud fragment shader (Bruneton integrated, no debug branches) ────────
 
@@ -131,6 +132,9 @@ uniform vec3 u_maxIntervalHeights;
 
 uniform sampler2D u_historyTexture;
 uniform mat4 u_prevViewProjection;
+// 云 pass 可能以低于视口的分辨率渲染（textureScale<1），
+// gl_FragCoord 是 pass 自身分辨率，重建视线/深度时必须换算到全分辨率窗口坐标。
+uniform vec2 u_fullResolution;
 uniform float u_temporalAlpha;
 uniform int u_temporalEnabled;
 uniform int u_frame;
@@ -171,9 +175,11 @@ vec2 raySphereIntersect(vec3 ro, vec3 rd, float radius) {
 
 void reconstructRay(out vec3 ro, out vec3 rd) {
   ro = u_cameraPosition + u_altitudeCorrection;
+  // 用全分辨率窗口坐标，兼容半分辨率云渲染
+  vec2 windowCoord = v_textureCoordinates * u_fullResolution;
   // 与 Atmosphere 一致：近/远平面差分求视线，避免 clip z=1 在仰视净空时退化
-  vec4 eyeNear = czm_windowToEyeCoordinates(vec4(gl_FragCoord.xy, 0.0, 1.0));
-  vec4 eyeFar = czm_windowToEyeCoordinates(vec4(gl_FragCoord.xy, 1.0, 1.0));
+  vec4 eyeNear = czm_windowToEyeCoordinates(vec4(windowCoord, 0.0, 1.0));
+  vec4 eyeFar = czm_windowToEyeCoordinates(vec4(windowCoord, 1.0, 1.0));
   if (abs(eyeNear.w) > 1e-10) eyeNear /= eyeNear.w;
   if (abs(eyeFar.w) > 1e-10) eyeFar /= eyeFar.w;
   vec3 dirEC = eyeFar.xyz - eyeNear.xyz;
@@ -474,8 +480,9 @@ float sampleShadowOpticalDepthPCF(vec3 worldPos, float distToTop, float distOff,
   if (radius < 0.1) return readShadowOpticalDepth(uv, ci, distToTop, distOff);
   float sum = 0.0;
   float phi = interleavedGradientNoise(gl_FragCoord.xy) * 3.14159265 * 2.0;
-  for (int i = 0; i < 16; ++i) sum += readShadowOpticalDepth(uv + vogelDisk(i, 16, phi) * radius * u_shadowTexelSize, ci, distToTop, distOff);
-  return sum / 16.0;
+  // 性能优先：PCF 采样 16 → 8（阴影略糙，开销减半）
+  for (int i = 0; i < 8; ++i) sum += readShadowOpticalDepth(uv + vogelDisk(i, 8, phi) * radius * u_shadowTexelSize, ci, distToTop, distOff);
+  return sum / 8.0;
 }
 
 float sampleShadowOpticalDepth(vec3 rayPos, float distOff, float radius, float jitter) {
@@ -648,7 +655,7 @@ void main() {
   float rayDistToScene = 0.0;
   float hitAltitude = -1.0e9;
   if (depth < 1.0 - 1e-7) {
-    vec4 eyePos = czm_windowToEyeCoordinates(vec4(gl_FragCoord.xy, depth, 1.0));
+    vec4 eyePos = czm_windowToEyeCoordinates(vec4(v_textureCoordinates * u_fullResolution, depth, 1.0));
     if (abs(eyePos.w) > 1e-6) {
       eyePos /= eyePos.w;
       if (eyePos.z < 0.0) {
@@ -806,6 +813,9 @@ export class ThreeGeospatialPipeline {
     this.blueNoiseUrl = options.blueNoiseUrl ?? DEFAULT_BLUE_NOISE_URL;
     this.atmosphereAssetsBase = options.atmosphereAssetsBase ?? DEFAULT_ATMOSPHERE_ASSETS_BASE;
     this.atmosphereShaderBase = options.atmosphereShaderBase ?? DEFAULT_ATMOSPHERE_SHADER_BASE;
+    // 云 pass 渲染分辨率倍率（相对视口）。0.5 = 半分辨率，云采样量降到 1/4，是最大头性能优化；
+    // 需要更清晰可调到 0.75/1.0，需要更流畅可降到 0.35。
+    this.cloudRenderScale = Math.min(1, Math.max(0.25, Number(options.cloudRenderScale) || 0.5));
 
     this.params = {
       cloudsVisible: true,
@@ -816,13 +826,17 @@ export class ThreeGeospatialPipeline {
         { channel: 'b', altitude: 7500, height: 500, densityScale: 0.003, shapeAmount: 0.4, shapeDetailAmount: 0.0, weatherExponent: 1.0, shapeAlteringBias: 0.35, coverageFilterWidth: 0.5, coverage: 0.3, densityProfile: { expTerm: 0, exponent: 0, linearTerm: 0.75, constantTerm: 0.25 } },
         { channel: 'a' }
       ],
-      maxSteps: 500, maxStepsToSun: 8, minStepSize: 20.0, maxStepSize: 1000.0, maxRayDistance: 200000.0,
-      perspectiveStepScale: 1.005, minDensity: 1e-5, minExtinction: 1e-5, minTransmittance: 0.01,
+      // ── 性能优先默认值（画面略降级，保证流畅）──
+      // 主 raymarch：500 → 128 步；太阳方向 8 → 3 步；多散射 8 → 3 阶；
+      // 射线距离 200km → 80km（远处 51km 已完成淡出）；步长增长更快。
+      maxSteps: 128, maxStepsToSun: 3, minStepSize: 30.0, maxStepSize: 1400.0, maxRayDistance: 80000.0,
+      perspectiveStepScale: 1.01, minDensity: 1e-5, minExtinction: 1e-5, minTransmittance: 0.01,
       // 远处云距离衰减（米）：天际线附近射线斜穿云层累积过密，从 distFadeStart 起线性衰减到 distFadeEnd 完全消失
       distFadeStart: 11000.0, distFadeEnd: 51000.0,
-      minSecondaryStepSize: 100.0, secondaryStepScale: 2.0, multiScatteringOctaves: 8, lowLayerDensityBoost: 1.0,
+      minSecondaryStepSize: 200.0, secondaryStepScale: 2.0, multiScatteringOctaves: 3, lowLayerDensityBoost: 1.0,
       shadowLengthEnabled: true, useShadowBuffer: true, hazeEnabled: false,
-      maxShadowLengthIterationCount: 500, minShadowLengthStepSize: 50.0, maxShadowLengthRayDistance: 200000.0,
+      // 丁达尔/阴影长度步进同样降到 96 步，步长加大（原 500 步）
+      maxShadowLengthIterationCount: 96, minShadowLengthStepSize: 120.0, maxShadowLengthRayDistance: 200000.0,
       hazeDensityScale: 3e-5, hazeExponent: 1e-3, hazeScatteringCoefficient: 0.9, hazeAbsorptionCoefficient: 0.5,
       weatherRepeat: 100.0, shapeRepeat: 4.1, shapeDetailRepeat: 0.0005,
       turbulenceRepeat: 2.0, turbulenceDisplacement: 400.0,
@@ -1095,7 +1109,8 @@ uniform sampler2D irradiance_texture;
       u_aerialPerspectiveScale: () => p().aerialPerspectiveScale, u_cloudExposure: () => p().cloudExposure,
       u_magentaFixStrength: () => p().magentaFixStrength ?? 0.0,
       u_edgeAlphaCutoff: () => p().edgeAlphaCutoff ?? 0.03,
-      u_resolution: () => { const ctx = self.viewer.scene.context; return new Cesium.Cartesian2(ctx.drawingBufferWidth || 1, ctx.drawingBufferHeight || 1); },
+      u_resolution: () => { const ctx = self.viewer.scene.context; const s = self.cloudRenderScale; return new Cesium.Cartesian2(Math.max(1, Math.round((ctx.drawingBufferWidth || 1) * s)), Math.max(1, Math.round((ctx.drawingBufferHeight || 1) * s))); },
+      u_fullResolution: () => { const ctx = self.viewer.scene.context; return new Cesium.Cartesian2(ctx.drawingBufferWidth || 1, ctx.drawingBufferHeight || 1); },
       u_mipLevelScale: () => Number(p().mipLevelScale) || 1.0,
       u_perspectiveStepScale: () => p().perspectiveStepScale ?? 1.01,
       u_minDensity: () => p().minDensity ?? 1e-5, u_minExtinction: () => p().minExtinction ?? 1e-5,
@@ -1497,7 +1512,7 @@ uniform sampler2D irradiance_texture;
       const { CloudShadowPass } = await import("./CloudShadowPass.js");
       const { ShadowResolvePass } = await import("./ShadowResolvePass.js");
       if (this.params.useShadowBuffer && this.textures) {
-        this._bsm.pass = new CloudShadowPass(viewer, { textures: this.textures, params: this._getShadowPassParams() });
+        this._bsm.pass = new CloudShadowPass(viewer, { textures: this.textures, params: this._getShadowPassParams(), size: SHADOW_MAP_SIZE });
         this._bsm.pass.init();
         // 静止 temporalAlpha 对齐 three-geospatial≈0.01；运动时 ShadowResolvePass 内会抬高 alpha
         this._bsm.resolve = new ShadowResolvePass(viewer, { size: SHADOW_MAP_SIZE, temporalAlpha: 0.01 });
@@ -1512,6 +1527,8 @@ uniform sampler2D irradiance_texture;
         !!cloudCtx.halfFloatingPointTexture && !!cloudCtx.colorBufferHalfFloat;
       this.cloudStage = new Cesium.PostProcessStage({
         name: "GeospatialVolumetricClouds", fragmentShader, uniforms,
+        // 半分辨率渲染云（最大性能优化项），输出自动上采样回视口
+        textureScale: this.cloudRenderScale,
         pixelFormat: Cesium.PixelFormat.RGBA,
         pixelDatatype: canCloudHalfFloat
           ? Cesium.PixelDatatype.HALF_FLOAT
